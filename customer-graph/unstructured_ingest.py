@@ -5,11 +5,35 @@ from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import CharacterTextSplitter
 from neo4j import GraphDatabase
+from neo4j_graphrag.embeddings import SentenceTransformerEmbeddings
 from neo4j_graphrag.experimental.components.pdf_loader import DataLoader
 from neo4j_graphrag.experimental.components.text_splitters.langchain import LangChainTextSplitterAdapter
 from neo4j_graphrag.experimental.components.types import PdfDocument, DocumentInfo
 from neo4j_graphrag.experimental.pipeline.kg_builder import SimpleKGPipeline
 from rag_schema_from_onto import getSchemaFromOnto
+from neo4j_graphrag.llm.base import LLMInterface, LLMResponse
+
+#Change to HuggingFaceLLM from OpenAI LLM
+try:
+    from neo4j_graphrag.llm.huggingface_llm import HuggingFaceLLM
+    llm = HuggingFaceLLM(
+        model_name="HuggingFaceH4/zephyr-7b-beta",
+        model_params={
+            "temperature": 0,
+            "max_new_tokens": 512,
+        },
+    )
+except ImportError:
+    class MockLLM(LLMInterface):
+        def __init__(self, model_name="mock-llm"):
+            super().__init__(model_name=model_name)
+        def __call__(self, prompt, **kwargs):
+            return LLMResponse(content="Mock response")
+        def invoke(self, prompt, **kwargs):
+            return LLMResponse(content="Mock response")
+        async def ainvoke(self, prompt, **kwargs):
+            return LLMResponse(content="Mock response")
+    llm = MockLLM()
 
 load_dotenv()
 NEO4J_URI = os.getenv("NEO4J_URI")
@@ -38,61 +62,22 @@ splitter = LangChainTextSplitterAdapter(
     CharacterTextSplitter(chunk_size=15_000, chunk_overlap=0, separator=" __PAGE__BREAK__ ")
 )
 
-# Create an Embedder object using neo4j_graphrag's own class
-try:
-    from neo4j_graphrag.embeddings import SentenceTransformerEmbeddings
-    embedder = SentenceTransformerEmbeddings("sentence-transformers/all-MiniLM-L6-v2")
-except ImportError:
-    # Check what's available
-    import neo4j_graphrag.embeddings as embeddings
-    print("Available in neo4j_graphrag.embeddings:", dir(embeddings))
-    # Fallback to using LangChain embeddings
-    from langchain_community.embeddings import HuggingFaceEmbeddings
-    embedder = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-
-# Instantiate the LLM using neo4j_graphrag's own class
-try:
-    from neo4j_graphrag.llm import OllamaLLM
-    llm = OllamaLLM(model_name="llama2")  # or try without LLM
-except ImportError:
-    # Check what's available
-    import neo4j_graphrag.llm as llm_module
-    print("Available in neo4j_graphrag.llm:", dir(llm_module))
-    # Create a simple mock LLM that implements the interface
-    from neo4j_graphrag.llm import LLMInterface
-    class MockLLM(LLMInterface):
-        def invoke(self, prompt: str, **kwargs):
-            return "Mock response for testing"
-        
-        async def ainvoke(self, prompt: str, **kwargs):
-            return "Mock response for testing"
-        
-        def generate(self, prompt: str, **kwargs):
-            return "Mock response for testing"
-    llm = MockLLM()
+# Create an Embedder object
+embedder = SentenceTransformerEmbeddings(model="sentence-transformers/all-MiniLM-L6-v2")
 
 # instantiate the SimpleKGPipeline
-pipeline_args = {
-    "llm": llm,  # Always include LLM since it's required
-    "driver": driver,
-    "pdf_loader": PdfLoaderWithPageBreaks(),
-    "text_splitter": splitter,
-    "embedder": embedder,
-    "entities": [node.label for node in neo4j_schema.node_types],
-    "relations": [
-        {
-            "type": pattern[1],  # relationship type from pattern
-            "source": pattern[0],  # source node from pattern
-            "target": pattern[2]   # target node from pattern
-        }
-        for pattern in neo4j_schema.patterns
-    ],
-    "potential_schema": list(neo4j_schema.patterns),
-    "on_error": "IGNORE",
-    "from_pdf": True,
-}
-
-kg_builder = SimpleKGPipeline(**pipeline_args)
+kg_builder = SimpleKGPipeline(
+    llm=llm,
+    driver=driver,
+    pdf_loader=PdfLoaderWithPageBreaks(),
+    text_splitter=splitter,
+    embedder=embedder,
+    entities=[node.label for node in neo4j_schema.node_types],
+    relations=[rel.label for rel in neo4j_schema.relationship_types],
+    potential_schema=list(neo4j_schema.patterns),
+    on_error="IGNORE",
+    from_pdf=True,
+)
 
 # load credit notes
 asyncio.run(kg_builder.run_async(file_path='data/credit-notes.pdf'))
